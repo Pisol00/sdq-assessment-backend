@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: sdq_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sdq
+      POSTGRES_PASSWORD: sdq_dev_password
+      POSTGRES_DB: sdq_assessment
+    ports:
+      - "5432:5432"
+    volumes:
+      - sdq_pgdata:/var/lib/postgresql/data
+
+volumes:
+  sdq_pgdata:
