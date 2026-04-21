@@ -1,6 +1,8 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
+  NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -64,6 +66,39 @@ export class AuthService {
     if (!ok) throw new UnauthorizedException('Invalid credentials');
 
     return this.issueToken(user);
+  }
+
+  async updateMe(userId: string, updates: { name?: string }) {
+    const user = await this.users.findOne({ where: { id: userId } });
+    if (!user) throw new NotFoundException('User not found');
+    if (updates.name !== undefined) user.name = updates.name;
+    await this.users.save(user);
+    return {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role,
+    };
+  }
+
+  async changePassword(
+    userId: string,
+    currentPassword: string,
+    newPassword: string,
+  ) {
+    const user = await this.users
+      .createQueryBuilder('u')
+      .addSelect('u.password')
+      .where('u.id = :id', { id: userId })
+      .getOne();
+    if (!user) throw new NotFoundException('User not found');
+
+    const ok = await bcrypt.compare(currentPassword, user.password);
+    if (!ok) throw new BadRequestException('Current password is incorrect');
+
+    user.password = await bcrypt.hash(newPassword, 10);
+    await this.users.save(user);
+    return { success: true };
   }
 
   private issueToken(user: User) {
