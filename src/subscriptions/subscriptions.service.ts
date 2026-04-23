@@ -82,4 +82,12 @@ export class SubscriptionsService {
         : new Date(Date.now() + durationDays * 24 * 60 * 60 * 1000);
     return this.subs.save(sub);
   }
+
+  async downgradeToFree(userId: string): Promise<Subscription> {
+    const sub = await this.getByUser(userId);
+    sub.plan = SubscriptionPlan.FREE;
+    sub.status = SubscriptionStatus.CANCELLED;
+    sub.endDate = new Date();
+    return this.subs.save(sub);
+  }
 }

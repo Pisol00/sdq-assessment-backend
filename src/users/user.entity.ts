@@ -34,6 +34,13 @@ export class User {
   @Column({ default: true })
   isActive: boolean;
 
+  @Column({ default: false })
+  emailVerified: boolean;
+
+  @Index({ unique: true, where: '"stripeCustomerId" IS NOT NULL' })
+  @Column({ type: 'varchar', nullable: true })
+  stripeCustomerId: string | null;
+
   @CreateDateColumn()
   createdAt: Date;
 

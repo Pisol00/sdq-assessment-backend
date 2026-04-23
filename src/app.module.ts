@@ -9,6 +9,7 @@ import { StudentsModule } from './students/students.module';
 import { AssessmentsModule } from './assessments/assessments.module';
 import { SubscriptionsModule } from './subscriptions/subscriptions.module';
 import { PaymentsModule } from './payments/payments.module';
+import { AdminModule } from './admin/admin.module';
 import { AppController } from './app.controller';
 
 @Module({
@@ -22,6 +23,7 @@ import { AppController } from './app.controller';
     AssessmentsModule,
     SubscriptionsModule,
     PaymentsModule,
+    AdminModule,
   ],
   controllers: [AppController],
 })

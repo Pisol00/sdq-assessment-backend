@@ -8,11 +8,12 @@ import {
   PrimaryGeneratedColumn,
   UpdateDateColumn,
 } from 'typeorm';
-import { PaymentMethod, PaymentStatus, SubscriptionPlan } from '../common/enums';
+import { PaymentStatus, SubscriptionPlan } from '../common/enums';
 import { User } from '../users/user.entity';
 
 @Entity('payments')
 @Index(['userId'])
+@Index(['stripeSessionId'], { unique: true, where: '"stripeSessionId" IS NOT NULL' })
 export class Payment {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -33,14 +34,20 @@ export class Payment {
   @Column({ default: 'THB' })
   currency: string;
 
-  @Column({ type: 'enum', enum: PaymentMethod })
-  method: PaymentMethod;
-
   @Column({ type: 'enum', enum: PaymentStatus, default: PaymentStatus.PENDING })
   status: PaymentStatus;
 
   @Column({ type: 'varchar', nullable: true })
-  omiseChargeId: string | null;
+  stripeSessionId: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  stripePaymentIntentId: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  stripeSubscriptionId: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  stripeCustomerId: string | null;
 
   @Column({ type: 'jsonb', nullable: true })
   metadata: Record<string, unknown> | null;
