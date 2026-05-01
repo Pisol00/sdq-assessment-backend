@@ -97,6 +97,13 @@ export class AuthController {
     return this.authService.verifyPasswordResetCode(token, code);
   }
 
+  @Throttle({ default: { ttl: 60_000, limit: 3 } })
+  @Post('forgot-password/:token/resend')
+  @HttpCode(200)
+  resendPasswordResetCode(@Param('token') token: string) {
+    return this.authService.resendPasswordResetCode(token);
+  }
+
   @Throttle({ default: { ttl: 60_000, limit: 5 } })
   @Post('reset-password')
   @HttpCode(200)

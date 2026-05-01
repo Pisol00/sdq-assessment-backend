@@ -45,7 +45,14 @@ export class AuthService {
 
   async signup(dto: SignupDto, ctx?: AuditContext) {
     const existing = await this.users.findOne({ where: { email: dto.email } });
-    if (existing) throw new ConflictException('Email already registered');
+    if (existing) {
+      if (!existing.emailVerified) {
+        throw new ConflictException(
+          'อีเมลนี้สมัครไว้แล้วแต่ยังไม่ได้ยืนยัน กรุณาเข้าสู่ระบบเพื่อยืนยันอีเมล',
+        );
+      }
+      throw new ConflictException('อีเมลนี้ถูกใช้งานแล้ว');
+    }
 
     const hashed = await bcrypt.hash(dto.password, 10);
     const user = this.users.create({
@@ -99,7 +106,9 @@ export class AuthService {
         expiresAt: new Date(Date.now() + EMAIL_VERIFICATION_TTL_MS),
       }),
     );
-    await this.email.sendEmailVerificationCode(email, code);
+    // Send email out-of-band so signup/resend never fails when SMTP is slow.
+    // Errors are logged inside email.service; the user can always tap "ส่งรหัสใหม่".
+    void this.email.sendEmailVerificationCode(email, code);
   }
 
   private async createCheckEmailSession(userId: string): Promise<string> {
@@ -293,7 +302,22 @@ export class AuthService {
         expiresAt: new Date(Date.now() + PASSWORD_RESET_TTL_MS),
       }),
     );
-    await this.email.sendPasswordResetCode(email, code);
+    void this.email.sendPasswordResetCode(email, code);
+  }
+
+  async resendPasswordResetCode(rawToken: string): Promise<{ success: true }> {
+    const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+    const session = await this.tokens.findOne({
+      where: { tokenHash, purpose: AuthTokenPurpose.PASSWORD_RESET_SESSION },
+    });
+    if (!session || session.usedAt || session.expiresAt.getTime() < Date.now()) {
+      throw new NotFoundException('Invalid or expired session');
+    }
+    const user = await this.users.findOne({ where: { id: session.userId } });
+    if (user && user.isActive) {
+      await this.issuePasswordResetCode(user.id, user.email);
+    }
+    return { success: true };
   }
 
   async getPasswordResetSession(
