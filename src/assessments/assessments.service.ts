@@ -15,6 +15,8 @@ import {
   interpretSdqScores,
 } from './sdq-calculator';
 import { SDQ_QUESTIONS } from './sdq-questions';
+import { AuditLogService, AuditContext } from '../audit/audit-log.service';
+import { AuditAction } from '../audit/audit-log.entity';
 
 @Injectable()
 export class AssessmentsService {
@@ -22,6 +24,7 @@ export class AssessmentsService {
     @InjectRepository(Assessment)
     private readonly repo: Repository<Assessment>,
     private readonly students: StudentsService,
+    private readonly audit: AuditLogService,
   ) {}
 
   getQuestions() {
@@ -69,7 +72,12 @@ export class AssessmentsService {
     return this.repo.save(assessment);
   }
 
-  async submit(id: string, userId: string, dto: SubmitResponsesDto) {
+  async submit(
+    id: string,
+    userId: string,
+    dto: SubmitResponsesDto,
+    ctx?: AuditContext,
+  ) {
     const assessment = await this.findOneForUser(id, userId);
     const responses: Record<number, 0 | 1 | 2> = {};
     for (const [k, v] of Object.entries(dto.responses)) {
@@ -85,12 +93,32 @@ export class AssessmentsService {
       assessment.interpretations = interpretSdqScores(scores);
       assessment.date = new Date();
     }
-    return this.repo.save(assessment);
+    const saved = await this.repo.save(assessment);
+
+    if (dto.completed) {
+      this.audit.log({
+        action: AuditAction.ASSESSMENT_SUBMITTED,
+        actorUserId: userId,
+        resourceType: 'assessment',
+        resourceId: saved.id,
+        metadata: { studentId: saved.studentId },
+        context: ctx,
+      });
+    }
+    return saved;
   }
 
-  async remove(id: string, userId: string) {
+  async remove(id: string, userId: string, ctx?: AuditContext) {
     const a = await this.findOneForUser(id, userId);
     await this.repo.remove(a);
+    this.audit.log({
+      action: AuditAction.ASSESSMENT_DELETED,
+      actorUserId: userId,
+      resourceType: 'assessment',
+      resourceId: id,
+      metadata: { studentId: a.studentId },
+      context: ctx,
+    });
     return { success: true };
   }
 

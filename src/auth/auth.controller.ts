@@ -10,6 +10,8 @@ import {
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
+import { AuditCtx } from '../audit/audit-context.decorator';
+import type { AuditContext } from '../audit/audit-log.service';
 import { AuthService } from './auth.service';
 import { SignupDto } from './dto/signup.dto';
 import { SigninDto } from './dto/signin.dto';
@@ -28,13 +30,13 @@ export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   @Post('signup')
-  signup(@Body() dto: SignupDto) {
-    return this.authService.signup(dto);
+  signup(@Body() dto: SignupDto, @AuditCtx() ctx: AuditContext) {
+    return this.authService.signup(dto, ctx);
   }
 
   @Post('signin')
-  signin(@Body() dto: SigninDto) {
-    return this.authService.signin(dto);
+  signin(@Body() dto: SigninDto, @AuditCtx() ctx: AuditContext) {
+    return this.authService.signin(dto, ctx);
   }
 
   @ApiBearerAuth()
@@ -60,19 +62,24 @@ export class AuthController {
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
   @Post('change-password')
-  changePassword(@CurrentUser() user: User, @Body() dto: ChangePasswordDto) {
+  changePassword(
+    @CurrentUser() user: User,
+    @Body() dto: ChangePasswordDto,
+    @AuditCtx() ctx: AuditContext,
+  ) {
     return this.authService.changePassword(
       user.id,
       dto.currentPassword,
       dto.newPassword,
+      ctx,
     );
   }
 
   @Throttle({ default: { ttl: 60_000, limit: 3 } })
   @Post('forgot-password')
   @HttpCode(200)
-  forgotPassword(@Body() dto: ForgotPasswordDto) {
-    return this.authService.requestPasswordReset(dto.email);
+  forgotPassword(@Body() dto: ForgotPasswordDto, @AuditCtx() ctx: AuditContext) {
+    return this.authService.requestPasswordReset(dto.email, ctx);
   }
 
   @Get('forgot-password/:token')
@@ -93,11 +100,12 @@ export class AuthController {
   @Throttle({ default: { ttl: 60_000, limit: 5 } })
   @Post('reset-password')
   @HttpCode(200)
-  resetPassword(@Body() dto: ResetPasswordDto) {
+  resetPassword(@Body() dto: ResetPasswordDto, @AuditCtx() ctx: AuditContext) {
     return this.authService.resetPassword(
       dto.sessionToken,
       dto.code,
       dto.newPassword,
+      ctx,
     );
   }
 
@@ -115,8 +123,12 @@ export class AuthController {
   @Throttle({ default: { ttl: 60_000, limit: 5 } })
   @Post('verify-email/confirm')
   @HttpCode(200)
-  verifyEmail(@CurrentUser() user: User, @Body() dto: VerifyEmailDto) {
-    return this.authService.verifyEmail(user.id, dto.code);
+  verifyEmail(
+    @CurrentUser() user: User,
+    @Body() dto: VerifyEmailDto,
+    @AuditCtx() ctx: AuditContext,
+  ) {
+    return this.authService.verifyEmail(user.id, dto.code, ctx);
   }
 
   @ApiBearerAuth()

@@ -19,6 +19,8 @@ import {
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { User } from '../users/user.entity';
+import { AuditCtx } from '../audit/audit-context.decorator';
+import type { AuditContext } from '../audit/audit-log.service';
 
 @ApiTags('assessments')
 @Controller('assessments')
@@ -87,8 +89,9 @@ export class AssessmentsController {
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: User,
     @Body() dto: SubmitResponsesDto,
+    @AuditCtx() ctx: AuditContext,
   ) {
-    return this.service.submit(id, user.id, dto);
+    return this.service.submit(id, user.id, dto, ctx);
   }
 
   @ApiBearerAuth()
@@ -97,7 +100,8 @@ export class AssessmentsController {
   remove(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: User,
+    @AuditCtx() ctx: AuditContext,
   ) {
-    return this.service.remove(id, user.id);
+    return this.service.remove(id, user.id, ctx);
   }
 }

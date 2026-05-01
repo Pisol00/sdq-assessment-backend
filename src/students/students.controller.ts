@@ -19,6 +19,8 @@ import { CreateStudentDto, UpdateStudentDto } from './dto/student.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { User } from '../users/user.entity';
+import { AuditCtx } from '../audit/audit-context.decorator';
+import type { AuditContext } from '../audit/audit-log.service';
 
 @ApiTags('students')
 @ApiBearerAuth()
@@ -44,8 +46,12 @@ export class StudentsController {
   }
 
   @Post()
-  create(@CurrentUser() user: User, @Body() dto: CreateStudentDto) {
-    return this.service.create(user.id, dto);
+  create(
+    @CurrentUser() user: User,
+    @Body() dto: CreateStudentDto,
+    @AuditCtx() ctx: AuditContext,
+  ) {
+    return this.service.create(user.id, dto, ctx);
   }
 
   @Patch(':id')
@@ -53,16 +59,18 @@ export class StudentsController {
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: User,
     @Body() dto: UpdateStudentDto,
+    @AuditCtx() ctx: AuditContext,
   ) {
-    return this.service.update(id, user.id, dto);
+    return this.service.update(id, user.id, dto, ctx);
   }
 
   @Delete(':id')
   remove(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: User,
+    @AuditCtx() ctx: AuditContext,
   ) {
-    return this.service.remove(id, user.id);
+    return this.service.remove(id, user.id, ctx);
   }
 
   @Post('import')
@@ -72,7 +80,8 @@ export class StudentsController {
     @Query('classroomId', ParseUUIDPipe) classroomId: string,
     @CurrentUser() user: User,
     @UploadedFile() file: Express.Multer.File,
+    @AuditCtx() ctx: AuditContext,
   ) {
-    return this.service.importFromExcel(classroomId, user.id, file);
+    return this.service.importFromExcel(classroomId, user.id, file, ctx);
   }
 }

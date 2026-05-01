@@ -14,6 +14,8 @@ import { User } from '../users/user.entity';
 import { Subscription } from '../subscriptions/subscription.entity';
 import { AuthToken, AuthTokenPurpose } from './auth-token.entity';
 import { EmailService } from './email.service';
+import { AuditLogService, AuditContext } from '../audit/audit-log.service';
+import { AuditAction } from '../audit/audit-log.entity';
 import { SignupDto } from './dto/signup.dto';
 import { SigninDto } from './dto/signin.dto';
 import {
@@ -38,9 +40,10 @@ export class AuthService {
     private readonly tokens: Repository<AuthToken>,
     private readonly jwt: JwtService,
     private readonly email: EmailService,
+    private readonly audit: AuditLogService,
   ) {}
 
-  async signup(dto: SignupDto) {
+  async signup(dto: SignupDto, ctx?: AuditContext) {
     const existing = await this.users.findOne({ where: { email: dto.email } });
     if (existing) throw new ConflictException('Email already registered');
 
@@ -64,6 +67,14 @@ export class AuthService {
     const checkEmailToken = await this.createCheckEmailSession(user.id);
     await this.issueEmailVerificationCode(user.id, user.email);
     const auth = this.issueToken(user);
+
+    this.audit.log({
+      action: AuditAction.SIGNUP,
+      actorUserId: user.id,
+      actorEmail: user.email,
+      context: ctx,
+    });
+
     return { ...auth, checkEmailToken };
   }
 
@@ -140,18 +151,41 @@ export class AuthService {
     return { email: user.email };
   }
 
-  async signin(dto: SigninDto) {
+  async signin(dto: SigninDto, ctx?: AuditContext) {
     const user = await this.users
       .createQueryBuilder('u')
       .addSelect('u.password')
       .where('u.email = :email', { email: dto.email })
       .getOne();
 
-    if (!user || !user.isActive) throw new UnauthorizedException('Invalid credentials');
+    if (!user || !user.isActive) {
+      this.audit.log({
+        action: AuditAction.SIGNIN_FAILED,
+        actorEmail: dto.email,
+        metadata: { reason: !user ? 'unknown_email' : 'inactive' },
+        context: ctx,
+      });
+      throw new UnauthorizedException('Invalid credentials');
+    }
 
     const ok = await bcrypt.compare(dto.password, user.password);
-    if (!ok) throw new UnauthorizedException('Invalid credentials');
+    if (!ok) {
+      this.audit.log({
+        action: AuditAction.SIGNIN_FAILED,
+        actorUserId: user.id,
+        actorEmail: user.email,
+        metadata: { reason: 'wrong_password' },
+        context: ctx,
+      });
+      throw new UnauthorizedException('Invalid credentials');
+    }
 
+    this.audit.log({
+      action: AuditAction.SIGNIN_SUCCESS,
+      actorUserId: user.id,
+      actorEmail: user.email,
+      context: ctx,
+    });
     return this.issueToken(user);
   }
 
@@ -173,6 +207,7 @@ export class AuthService {
     userId: string,
     currentPassword: string,
     newPassword: string,
+    ctx?: AuditContext,
   ) {
     const user = await this.users
       .createQueryBuilder('u')
@@ -186,16 +221,32 @@ export class AuthService {
 
     user.password = await bcrypt.hash(newPassword, 10);
     await this.users.save(user);
+
+    this.audit.log({
+      action: AuditAction.PASSWORD_CHANGED,
+      actorUserId: user.id,
+      actorEmail: user.email,
+      context: ctx,
+    });
     return { success: true };
   }
 
-  async requestPasswordReset(email: string): Promise<{ sessionToken: string }> {
+  async requestPasswordReset(
+    email: string,
+    ctx?: AuditContext,
+  ): Promise<{ sessionToken: string }> {
     const user = await this.users.findOne({ where: { email } });
     // Always return a session token (even when user doesn't exist) to avoid
     // email enumeration. The next step will fail uniformly with "Invalid code".
     const sessionToken = await this.createPasswordResetSession(user?.id ?? null);
     if (user && user.isActive) {
       await this.issuePasswordResetCode(user.id, user.email);
+      this.audit.log({
+        action: AuditAction.PASSWORD_RESET_REQUESTED,
+        actorUserId: user.id,
+        actorEmail: user.email,
+        context: ctx,
+      });
     }
     return { sessionToken };
   }
@@ -318,6 +369,7 @@ export class AuthService {
     sessionToken: string,
     code: string,
     newPassword: string,
+    ctx?: AuditContext,
   ): Promise<{ success: true }> {
     if (!/^\d{6}$/.test(code)) {
       throw new BadRequestException('รหัสไม่ถูกต้อง');
@@ -372,6 +424,13 @@ export class AuthService {
     session.usedAt = new Date();
     await this.tokens.save([codeToken, session]);
 
+    this.audit.log({
+      action: AuditAction.PASSWORD_RESET_COMPLETED,
+      actorUserId: user.id,
+      actorEmail: user.email,
+      context: ctx,
+    });
+
     return { success: true };
   }
 
@@ -383,7 +442,7 @@ export class AuthService {
     return { success: true };
   }
 
-  async verifyEmail(userId: string, code: string) {
+  async verifyEmail(userId: string, code: string, ctx?: AuditContext) {
     if (!/^\d{6}$/.test(code)) {
       throw new BadRequestException('รหัสไม่ถูกต้อง');
     }
@@ -417,7 +476,8 @@ export class AuthService {
 
     const user = await this.users.findOne({ where: { id: userId } });
     if (!user) throw new BadRequestException('User not found');
-    if (!user.emailVerified) {
+    const wasUnverified = !user.emailVerified;
+    if (wasUnverified) {
       user.emailVerified = true;
       await this.users.save(user);
     }
@@ -427,6 +487,14 @@ export class AuthService {
         purpose: AuthTokenPurpose.CHECK_EMAIL_SESSION,
       })
       .catch(() => undefined);
+    if (wasUnverified) {
+      this.audit.log({
+        action: AuditAction.EMAIL_VERIFIED,
+        actorUserId: user.id,
+        actorEmail: user.email,
+        context: ctx,
+      });
+    }
     // Re-issue JWT so the new emailVerified=true claim takes effect
     return this.issueToken(user);
   }

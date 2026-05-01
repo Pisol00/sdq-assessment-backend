@@ -5,6 +5,8 @@ import { User } from '../users/user.entity';
 import { Subscription } from '../subscriptions/subscription.entity';
 import { Assessment } from '../assessments/assessment.entity';
 import { SubscriptionPlan } from '../common/enums';
+import { AuditLogService, AuditContext } from '../audit/audit-log.service';
+import { AuditAction } from '../audit/audit-log.entity';
 
 export interface AdminUserView {
   id: string;
@@ -32,6 +34,7 @@ export class AdminService {
     private readonly subs: Repository<Subscription>,
     @InjectRepository(Assessment)
     private readonly assessments: Repository<Assessment>,
+    private readonly audit: AuditLogService,
   ) {}
 
   async listUsers(): Promise<AdminUserView[]> {
@@ -61,14 +64,32 @@ export class AdminService {
     };
   }
 
-  async setUserStatus(id: string, isActive: boolean): Promise<AdminUserView> {
+  async setUserStatus(
+    id: string,
+    isActive: boolean,
+    actorId: string,
+    ctx?: AuditContext,
+  ): Promise<AdminUserView> {
     const user = await this.users.findOne({
       where: { id },
       relations: ['subscription'],
     });
     if (!user) throw new NotFoundException('User not found');
+    if (user.isActive === isActive) {
+      return this.toView(user);
+    }
     user.isActive = isActive;
     await this.users.save(user);
+    this.audit.log({
+      action: isActive
+        ? AuditAction.ADMIN_USER_ACTIVATED
+        : AuditAction.ADMIN_USER_DEACTIVATED,
+      actorUserId: actorId,
+      resourceType: 'user',
+      resourceId: user.id,
+      metadata: { targetEmail: user.email },
+      context: ctx,
+    });
     return this.toView(user);
   }
 

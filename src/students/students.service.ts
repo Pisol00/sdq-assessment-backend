@@ -11,6 +11,8 @@ import { Student } from './student.entity';
 import { CreateStudentDto, UpdateStudentDto } from './dto/student.dto';
 import { ClassroomsService } from '../classrooms/classrooms.service';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
+import { AuditLogService, AuditContext } from '../audit/audit-log.service';
+import { AuditAction } from '../audit/audit-log.entity';
 import { Gender } from '../common/enums';
 
 @Injectable()
@@ -19,6 +21,7 @@ export class StudentsService {
     @InjectRepository(Student) private readonly repo: Repository<Student>,
     private readonly classrooms: ClassroomsService,
     private readonly subs: SubscriptionsService,
+    private readonly audit: AuditLogService,
   ) {}
 
   async findAllByClassroom(classroomId: string, userId: string) {
@@ -40,7 +43,7 @@ export class StudentsService {
     return student;
   }
 
-  async create(userId: string, dto: CreateStudentDto) {
+  async create(userId: string, dto: CreateStudentDto, ctx?: AuditContext) {
     await this.classrooms.findOneForUser(dto.classroomId, userId);
     await this.subs.assertCanCreateStudent(userId);
 
@@ -52,21 +55,57 @@ export class StudentsService {
     }
 
     const student = this.repo.create(dto);
-    return this.repo.save(student);
+    const saved = await this.repo.save(student);
+
+    this.audit.log({
+      action: AuditAction.STUDENT_CREATED,
+      actorUserId: userId,
+      resourceType: 'student',
+      resourceId: saved.id,
+      metadata: { classroomId: saved.classroomId, studentCode: saved.studentCode },
+      context: ctx,
+    });
+    return saved;
   }
 
-  async update(id: string, userId: string, dto: UpdateStudentDto) {
+  async update(
+    id: string,
+    userId: string,
+    dto: UpdateStudentDto,
+    ctx?: AuditContext,
+  ) {
     const student = await this.findOneForUser(id, userId);
     if (dto.classroomId && dto.classroomId !== student.classroomId) {
       await this.classrooms.findOneForUser(dto.classroomId, userId);
     }
+    const changes = diffChanges(student, dto);
     Object.assign(student, dto);
-    return this.repo.save(student);
+    const saved = await this.repo.save(student);
+
+    if (Object.keys(changes).length > 0) {
+      this.audit.log({
+        action: AuditAction.STUDENT_UPDATED,
+        actorUserId: userId,
+        resourceType: 'student',
+        resourceId: saved.id,
+        metadata: { changes },
+        context: ctx,
+      });
+    }
+    return saved;
   }
 
-  async remove(id: string, userId: string) {
+  async remove(id: string, userId: string, ctx?: AuditContext) {
     const student = await this.findOneForUser(id, userId);
     await this.repo.remove(student);
+    this.audit.log({
+      action: AuditAction.STUDENT_DELETED,
+      actorUserId: userId,
+      resourceType: 'student',
+      resourceId: id,
+      metadata: { classroomId: student.classroomId, studentCode: student.studentCode },
+      context: ctx,
+    });
     return { success: true };
   }
 
@@ -74,6 +113,7 @@ export class StudentsService {
     classroomId: string,
     userId: string,
     file: Express.Multer.File,
+    ctx?: AuditContext,
   ) {
     const classroom = await this.classrooms.findOneForUser(classroomId, userId);
 
@@ -151,6 +191,17 @@ export class StudentsService {
       ? await this.repo.save(this.repo.create(toCreate as Student[]))
       : [];
 
+    if (saved.length > 0) {
+      this.audit.log({
+        action: AuditAction.STUDENT_BULK_IMPORTED,
+        actorUserId: userId,
+        resourceType: 'classroom',
+        resourceId: classroomId,
+        metadata: { imported: saved.length, skipped: errors.length },
+        context: ctx,
+      });
+    }
+
     return { imported: saved.length, skipped: errors.length, errors };
   }
 }
@@ -161,4 +212,20 @@ function mapGender(raw: string): Gender | null {
   if (['f', 'female', 'หญิง'].includes(s)) return Gender.FEMALE;
   if (['o', 'other', 'อื่นๆ', 'อื่น ๆ'].includes(s)) return Gender.OTHER;
   return null;
+}
+
+/** Returns only the dto fields whose values differ from the entity. */
+function diffChanges<T extends object, U extends Partial<T>>(
+  entity: T,
+  patch: U,
+): Partial<U> {
+  const changes: Record<string, unknown> = {};
+  for (const [key, newValue] of Object.entries(patch)) {
+    if (newValue === undefined) continue;
+    const currentValue = (entity as Record<string, unknown>)[key];
+    if (currentValue !== newValue) {
+      changes[key] = newValue;
+    }
+  }
+  return changes as Partial<U>;
 }
