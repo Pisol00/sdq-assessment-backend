@@ -3,10 +3,12 @@ import {
   Controller,
   Get,
   HttpCode,
+  Param,
   Patch,
   Post,
   UseGuards,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
 import { SignupDto } from './dto/signup.dto';
@@ -66,29 +68,72 @@ export class AuthController {
     );
   }
 
+  @Throttle({ default: { ttl: 60_000, limit: 3 } })
   @Post('forgot-password')
   @HttpCode(200)
   forgotPassword(@Body() dto: ForgotPasswordDto) {
     return this.authService.requestPasswordReset(dto.email);
   }
 
+  @Get('forgot-password/:token')
+  getPasswordResetSession(@Param('token') token: string) {
+    return this.authService.getPasswordResetSession(token);
+  }
+
+  @Throttle({ default: { ttl: 60_000, limit: 5 } })
+  @Post('forgot-password/:token/verify-code')
+  @HttpCode(200)
+  verifyPasswordResetCode(
+    @Param('token') token: string,
+    @Body('code') code: string,
+  ) {
+    return this.authService.verifyPasswordResetCode(token, code);
+  }
+
+  @Throttle({ default: { ttl: 60_000, limit: 5 } })
   @Post('reset-password')
   @HttpCode(200)
   resetPassword(@Body() dto: ResetPasswordDto) {
-    return this.authService.resetPassword(dto.token, dto.newPassword);
+    return this.authService.resetPassword(
+      dto.sessionToken,
+      dto.code,
+      dto.newPassword,
+    );
   }
 
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
+  @Throttle({ default: { ttl: 60_000, limit: 3 } })
   @Post('verify-email/request')
   @HttpCode(200)
   requestEmailVerification(@CurrentUser() user: User) {
     return this.authService.requestEmailVerification(user.id);
   }
 
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @Throttle({ default: { ttl: 60_000, limit: 5 } })
   @Post('verify-email/confirm')
   @HttpCode(200)
-  verifyEmail(@Body() dto: VerifyEmailDto) {
-    return this.authService.verifyEmail(dto.token);
+  verifyEmail(@CurrentUser() user: User, @Body() dto: VerifyEmailDto) {
+    return this.authService.verifyEmail(user.id, dto.code);
+  }
+
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @Get('check-email/:token')
+  getCheckEmailSession(
+    @CurrentUser() user: User,
+    @Param('token') token: string,
+  ) {
+    return this.authService.getCheckEmailSession(token, user.id);
+  }
+
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @Post('check-email/issue')
+  @HttpCode(200)
+  issueCheckEmailSession(@CurrentUser() user: User) {
+    return this.authService.issueCheckEmailSession(user.id);
   }
 }

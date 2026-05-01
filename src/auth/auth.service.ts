@@ -9,7 +9,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { JwtService } from '@nestjs/jwt';
 import { LessThan, Repository } from 'typeorm';
 import * as bcrypt from 'bcrypt';
-import { createHash, randomBytes } from 'crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import { User } from '../users/user.entity';
 import { Subscription } from '../subscriptions/subscription.entity';
 import { AuthToken, AuthTokenPurpose } from './auth-token.entity';
@@ -23,8 +23,10 @@ import {
 } from '../common/enums';
 import { JwtPayload } from './jwt.strategy';
 
-const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000; // 1 hour
-const EMAIL_VERIFICATION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const PASSWORD_RESET_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const PASSWORD_RESET_SESSION_TTL_MS = 60 * 60 * 1000; // 1 hour
+const EMAIL_VERIFICATION_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const CHECK_EMAIL_SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 @Injectable()
 export class AuthService {
@@ -59,7 +61,83 @@ export class AuthService {
     });
     await this.subs.save(sub);
 
-    return this.issueToken(user);
+    const checkEmailToken = await this.createCheckEmailSession(user.id);
+    await this.issueEmailVerificationCode(user.id, user.email);
+    const auth = this.issueToken(user);
+    return { ...auth, checkEmailToken };
+  }
+
+  private async issueEmailVerificationCode(
+    userId: string,
+    email: string,
+  ): Promise<void> {
+    // Invalidate prior unused codes
+    await this.tokens
+      .delete({
+        userId,
+        purpose: AuthTokenPurpose.EMAIL_VERIFICATION,
+      })
+      .catch(() => undefined);
+    const code = String(Math.floor(100000 + Math.random() * 900000));
+    const codeHash = createHash('sha256').update(code).digest('hex');
+    await this.tokens.save(
+      this.tokens.create({
+        userId,
+        tokenHash: codeHash,
+        purpose: AuthTokenPurpose.EMAIL_VERIFICATION,
+        expiresAt: new Date(Date.now() + EMAIL_VERIFICATION_TTL_MS),
+      }),
+    );
+    await this.email.sendEmailVerificationCode(email, code);
+  }
+
+  private async createCheckEmailSession(userId: string): Promise<string> {
+    // Always invalidate prior sessions so old URLs stop working
+    await this.tokens
+      .delete({
+        userId,
+        purpose: AuthTokenPurpose.CHECK_EMAIL_SESSION,
+      })
+      .catch(() => undefined);
+    const { rawToken, tokenHash } = this.generateToken();
+    await this.tokens.save(
+      this.tokens.create({
+        userId,
+        tokenHash,
+        purpose: AuthTokenPurpose.CHECK_EMAIL_SESSION,
+        expiresAt: new Date(Date.now() + CHECK_EMAIL_SESSION_TTL_MS),
+      }),
+    );
+    return rawToken;
+  }
+
+  async issueCheckEmailSession(userId: string): Promise<{ token: string }> {
+    const user = await this.users.findOne({ where: { id: userId } });
+    if (!user) throw new NotFoundException('User not found');
+    if (user.emailVerified) {
+      throw new BadRequestException('Email already verified');
+    }
+    const token = await this.createCheckEmailSession(user.id);
+    return { token };
+  }
+
+  async getCheckEmailSession(
+    rawToken: string,
+    requestingUserId?: string,
+  ): Promise<{ email: string }> {
+    const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+    const token = await this.tokens.findOne({
+      where: { tokenHash, purpose: AuthTokenPurpose.CHECK_EMAIL_SESSION },
+    });
+    if (!token || token.usedAt || token.expiresAt.getTime() < Date.now()) {
+      throw new NotFoundException('Invalid or expired check-email session');
+    }
+    if (requestingUserId && requestingUserId !== token.userId) {
+      throw new NotFoundException('Invalid or expired check-email session');
+    }
+    const user = await this.users.findOne({ where: { id: token.userId } });
+    if (!user) throw new NotFoundException('User not found');
+    return { email: user.email };
   }
 
   async signin(dto: SigninDto) {
@@ -111,36 +189,189 @@ export class AuthService {
     return { success: true };
   }
 
-  async requestPasswordReset(email: string): Promise<{ success: true }> {
+  async requestPasswordReset(email: string): Promise<{ sessionToken: string }> {
     const user = await this.users.findOne({ where: { email } });
+    // Always return a session token (even when user doesn't exist) to avoid
+    // email enumeration. The next step will fail uniformly with "Invalid code".
+    const sessionToken = await this.createPasswordResetSession(user?.id ?? null);
     if (user && user.isActive) {
-      const { rawToken, tokenHash } = this.generateToken();
-      await this.tokens.save(
-        this.tokens.create({
-          userId: user.id,
-          tokenHash,
-          purpose: AuthTokenPurpose.PASSWORD_RESET,
-          expiresAt: new Date(Date.now() + PASSWORD_RESET_TTL_MS),
-        }),
-      );
-      await this.email.sendPasswordResetEmail(user.email, rawToken);
+      await this.issuePasswordResetCode(user.id, user.email);
     }
-    // Always return success to avoid email enumeration
-    return { success: true };
+    return { sessionToken };
+  }
+
+  private async createPasswordResetSession(
+    userId: string | null,
+  ): Promise<string> {
+    const effectiveUserId = userId ?? '00000000-0000-0000-0000-000000000000';
+    // Invalidate prior reset sessions so old URLs stop working
+    if (userId) {
+      await this.tokens
+        .delete({
+          userId: effectiveUserId,
+          purpose: AuthTokenPurpose.PASSWORD_RESET_SESSION,
+        })
+        .catch(() => undefined);
+    }
+    const { rawToken, tokenHash } = this.generateToken();
+    await this.tokens.save(
+      this.tokens.create({
+        userId: effectiveUserId,
+        tokenHash,
+        purpose: AuthTokenPurpose.PASSWORD_RESET_SESSION,
+        expiresAt: new Date(Date.now() + PASSWORD_RESET_SESSION_TTL_MS),
+      }),
+    );
+    return rawToken;
+  }
+
+  private async issuePasswordResetCode(
+    userId: string,
+    email: string,
+  ): Promise<void> {
+    await this.tokens
+      .delete({ userId, purpose: AuthTokenPurpose.PASSWORD_RESET })
+      .catch(() => undefined);
+    const code = String(Math.floor(100000 + Math.random() * 900000));
+    const codeHash = createHash('sha256').update(code).digest('hex');
+    await this.tokens.save(
+      this.tokens.create({
+        userId,
+        tokenHash: codeHash,
+        purpose: AuthTokenPurpose.PASSWORD_RESET,
+        expiresAt: new Date(Date.now() + PASSWORD_RESET_TTL_MS),
+      }),
+    );
+    await this.email.sendPasswordResetCode(email, code);
+  }
+
+  async getPasswordResetSession(
+    rawToken: string,
+  ): Promise<{ email: string | null }> {
+    const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+    const token = await this.tokens.findOne({
+      where: { tokenHash, purpose: AuthTokenPurpose.PASSWORD_RESET_SESSION },
+    });
+    if (!token || token.usedAt || token.expiresAt.getTime() < Date.now()) {
+      throw new NotFoundException('Invalid or expired session');
+    }
+    const user = await this.users.findOne({ where: { id: token.userId } });
+    // Mask email partially for privacy: a***@example.com
+    if (!user) return { email: null };
+    return { email: this.maskEmail(user.email) };
+  }
+
+  private maskEmail(email: string): string {
+    const [local, domain] = email.split('@');
+    if (!local || !domain) return email;
+    const visible = local.slice(0, 1);
+    return `${visible}${'*'.repeat(Math.max(local.length - 1, 1))}@${domain}`;
+  }
+
+  async verifyPasswordResetCode(
+    sessionToken: string,
+    code: string,
+  ): Promise<{ valid: true }> {
+    if (!/^\d{6}$/.test(code)) {
+      throw new BadRequestException('รหัสไม่ถูกต้อง');
+    }
+    const sessionHash = createHash('sha256').update(sessionToken).digest('hex');
+    const session = await this.tokens.findOne({
+      where: {
+        tokenHash: sessionHash,
+        purpose: AuthTokenPurpose.PASSWORD_RESET_SESSION,
+      },
+    });
+    if (
+      !session ||
+      session.usedAt ||
+      session.expiresAt.getTime() < Date.now()
+    ) {
+      throw new BadRequestException('Session หมดอายุ กรุณาเริ่มใหม่');
+    }
+    const codeToken = await this.tokens.findOne({
+      where: {
+        userId: session.userId,
+        purpose: AuthTokenPurpose.PASSWORD_RESET,
+      },
+      order: { createdAt: 'DESC' },
+    });
+    if (!codeToken || codeToken.usedAt) {
+      throw new BadRequestException('รหัสไม่ถูกต้อง');
+    }
+    if (codeToken.expiresAt.getTime() < Date.now()) {
+      throw new BadRequestException('รหัสหมดอายุแล้ว');
+    }
+    const codeHash = createHash('sha256').update(code).digest('hex');
+    const expected = Buffer.from(codeToken.tokenHash, 'hex');
+    const provided = Buffer.from(codeHash, 'hex');
+    const matches =
+      expected.length === provided.length &&
+      timingSafeEqual(expected, provided);
+    if (!matches) {
+      throw new BadRequestException('รหัสไม่ถูกต้อง');
+    }
+    return { valid: true };
   }
 
   async resetPassword(
-    rawToken: string,
+    sessionToken: string,
+    code: string,
     newPassword: string,
   ): Promise<{ success: true }> {
-    const token = await this.consumeToken(
-      rawToken,
-      AuthTokenPurpose.PASSWORD_RESET,
-    );
-    const user = await this.users.findOne({ where: { id: token.userId } });
-    if (!user) throw new BadRequestException('Invalid or expired token');
+    if (!/^\d{6}$/.test(code)) {
+      throw new BadRequestException('รหัสไม่ถูกต้อง');
+    }
+    // Validate session token
+    const sessionHash = createHash('sha256').update(sessionToken).digest('hex');
+    const session = await this.tokens.findOne({
+      where: {
+        tokenHash: sessionHash,
+        purpose: AuthTokenPurpose.PASSWORD_RESET_SESSION,
+      },
+    });
+    if (
+      !session ||
+      session.usedAt ||
+      session.expiresAt.getTime() < Date.now()
+    ) {
+      throw new BadRequestException('Session หมดอายุ กรุณาเริ่มใหม่');
+    }
+
+    // Validate code (most recent for this user)
+    const codeToken = await this.tokens.findOne({
+      where: {
+        userId: session.userId,
+        purpose: AuthTokenPurpose.PASSWORD_RESET,
+      },
+      order: { createdAt: 'DESC' },
+    });
+    if (!codeToken || codeToken.usedAt) {
+      throw new BadRequestException('รหัสไม่ถูกต้อง');
+    }
+    if (codeToken.expiresAt.getTime() < Date.now()) {
+      throw new BadRequestException('รหัสหมดอายุแล้ว');
+    }
+    const codeHash = createHash('sha256').update(code).digest('hex');
+    const expected = Buffer.from(codeToken.tokenHash, 'hex');
+    const provided = Buffer.from(codeHash, 'hex');
+    const matches =
+      expected.length === provided.length &&
+      timingSafeEqual(expected, provided);
+    if (!matches) {
+      throw new BadRequestException('รหัสไม่ถูกต้อง');
+    }
+
+    const user = await this.users.findOne({ where: { id: session.userId } });
+    if (!user) throw new BadRequestException('Invalid session');
+
     user.password = await bcrypt.hash(newPassword, 10);
     await this.users.save(user);
+
+    codeToken.usedAt = new Date();
+    session.usedAt = new Date();
+    await this.tokens.save([codeToken, session]);
+
     return { success: true };
   }
 
@@ -148,31 +379,56 @@ export class AuthService {
     const user = await this.users.findOne({ where: { id: userId } });
     if (!user) throw new NotFoundException('User not found');
     if (user.emailVerified) return { success: true };
-    const { rawToken, tokenHash } = this.generateToken();
-    await this.tokens.save(
-      this.tokens.create({
-        userId: user.id,
-        tokenHash,
-        purpose: AuthTokenPurpose.EMAIL_VERIFICATION,
-        expiresAt: new Date(Date.now() + EMAIL_VERIFICATION_TTL_MS),
-      }),
-    );
-    await this.email.sendEmailVerification(user.email, rawToken);
+    await this.issueEmailVerificationCode(user.id, user.email);
     return { success: true };
   }
 
-  async verifyEmail(rawToken: string): Promise<{ success: true }> {
-    const token = await this.consumeToken(
-      rawToken,
-      AuthTokenPurpose.EMAIL_VERIFICATION,
-    );
-    const user = await this.users.findOne({ where: { id: token.userId } });
-    if (!user) throw new BadRequestException('Invalid or expired token');
+  async verifyEmail(userId: string, code: string) {
+    if (!/^\d{6}$/.test(code)) {
+      throw new BadRequestException('รหัสไม่ถูกต้อง');
+    }
+    // Look up the most recent verification token for this user
+    const token = await this.tokens.findOne({
+      where: {
+        userId,
+        purpose: AuthTokenPurpose.EMAIL_VERIFICATION,
+      },
+      order: { createdAt: 'DESC' },
+    });
+    if (!token || token.usedAt) {
+      throw new BadRequestException('รหัสไม่ถูกต้อง');
+    }
+    if (token.expiresAt.getTime() < Date.now()) {
+      throw new BadRequestException('รหัสหมดอายุแล้ว');
+    }
+
+    const codeHash = createHash('sha256').update(code).digest('hex');
+    const expected = Buffer.from(token.tokenHash, 'hex');
+    const provided = Buffer.from(codeHash, 'hex');
+    const matches =
+      expected.length === provided.length &&
+      timingSafeEqual(expected, provided);
+    if (!matches) {
+      throw new BadRequestException('รหัสไม่ถูกต้อง');
+    }
+
+    token.usedAt = new Date();
+    await this.tokens.save(token);
+
+    const user = await this.users.findOne({ where: { id: userId } });
+    if (!user) throw new BadRequestException('User not found');
     if (!user.emailVerified) {
       user.emailVerified = true;
       await this.users.save(user);
     }
-    return { success: true };
+    await this.tokens
+      .delete({
+        userId: user.id,
+        purpose: AuthTokenPurpose.CHECK_EMAIL_SESSION,
+      })
+      .catch(() => undefined);
+    // Re-issue JWT so the new emailVerified=true claim takes effect
+    return this.issueToken(user);
   }
 
   private generateToken(): { rawToken: string; tokenHash: string } {
@@ -206,6 +462,7 @@ export class AuthService {
       sub: user.id,
       email: user.email,
       role: user.role,
+      emailVerified: user.emailVerified,
     };
     const accessToken = this.jwt.sign(payload);
     return {

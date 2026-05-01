@@ -1,7 +1,6 @@
-import { IsString, MinLength } from 'class-validator';
+import { Matches } from 'class-validator';
 
 export class VerifyEmailDto {
-  @IsString()
-  @MinLength(8)
-  token: string;
+  @Matches(/^\d{6}$/, { message: 'Code must be 6 digits' })
+  code: string;
 }
